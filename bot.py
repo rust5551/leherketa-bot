@@ -1,14 +1,16 @@
 import logging
 import os
 import glob
+import sqlite3
+import requests
 from telegram import Update
-from telegram.ext import filters, MessageHandler, ApplicationBuilder, ContextTypes, CommandHandler, Defaults
+from telegram.ext import filters, MessageHandler, ApplicationBuilder, ContextTypes, CommandHandler, Defaults, ConversationHandler
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
-BOT_TOKEN = os.environ['BOT-TOKEN']
+BOT_TOKEN = os.environ['BOT_TOKEN']
 
 def logger(update):
     with open("logs.txt", "a+", encoding="UTF-8") as f:
@@ -35,6 +37,20 @@ def checktype(message):
         return (message.video, "video")
     return None
 
+def get_nick(update):
+    nick = cur.execute(f"""SELECT nickname FROM nicknames WHERE id = {update.effective_user.id}""").fetchall()[0][0]
+    return nick
+
+def set_nick(update, nick):
+    cur.execute(f"""INSERT INTO
+                        nicknames (id, nickname)
+                    VALUES
+                        ({update.effective_user.id}, '{nick}');""")
+    con.commit()
+
+con = sqlite3.connect("data/users.db")
+cur = con.cursor()
+
 user_ids = []
 rooms = {}
 bot = ""
@@ -43,15 +59,32 @@ types = {"text": "",
          "audio": "",
          "sticker": "",}
 help_message = """
+/nickname – установить никнейм
+
 /makeroom [имя комнаты] – создать комнату
 
 /joinroom [имя комнаты] – войти в комнату
+
+/leaveroom – покинуть комнату
 
 /showrooms – показать список комнат
 
 /help – показать список команд
             """
 
+SET_NICKNAME = range(1) 
+
+async def nickname(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    logger(update)
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="Введите никнейм")
+    return SET_NICKNAME
+
+async def set_nickname(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger(update)
+    nick = update.message.text
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Вас теперь зовут {nick}")
+    set_nick(update, nick)
+    return ConversationHandler.END
 
 async def makeroom(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger(update)
@@ -59,13 +92,11 @@ async def makeroom(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_ids.append(update.effective_user.id)
         if context.args:
             rooms[context.args[0]] = [update.effective_user.id]
-            print(rooms)
         else:
             rooms[str(len(rooms) + 1)] = [update.effective_user.id]
         await context.bot.send_message(chat_id=update.effective_chat.id, text="Чат создан типо")
     else:
         await context.bot.send_message(chat_id=update.effective_chat.id, text="Ты уже создал чат дурень")
-    print(rooms)
     
 async def joinroom(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger(update)
@@ -75,29 +106,31 @@ async def joinroom(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         rooms[room].append(update.effective_user.id)
         await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Вы присоединились к комнате")
-        print(rooms[room][1])
-        await context.bot.send_message(chat_id=rooms[room][0], text=f"@{update.effective_user.username} присоединился к вашей комнате")
+        nick = get_nick(update)
+        await context.bot.send_message(chat_id=rooms[room][0], text=f"{nick} присоединился к вашей комнате")
     
 async def showrooms(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger(update)
     names = "Доступные комнаты: \n"
-    print(rooms)
     if rooms:
         for i in rooms.items():
             creator = await context.bot.get_chat(i[1][0])
-            print(creator)
-            names += f"\nСоздатель: @{creator.username} \nИмя комнаты: {i[0]} \nУчастников: {len(i[1])}"
+            nick = cur.execute(f"""SELECT nickname FROM nicknames WHERE id = {creator.id}""").fetchall()[0][0]
+            names += f"\nСоздатель: {nick} \nИмя комнаты: {i[0]} \nУчастников: {len(i[1])}"
     await context.bot.send_message(chat_id=update.effective_chat.id, text=names)
 
 async def leaveroom(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger(update)
     for i in rooms.items():
         if update.effective_user.id in i[1]:
+            if update.effective_user.id in user_ids:
+                user_ids.pop(user_ids.index(update.effective_user.id))
             i[1].pop(i[1].index(update.effective_user.id))
             rooms[i[0]] = i[1]
             await context.bot.send_message(chat_id=update.effective_chat.id, text="Вы покинули комнату")
             if i[1]:
-                await context.bot.send_message(chat_id=i[1][0], text=f"@{update.effective_user.username} покинул комнату")
+                nick = get_nick(update)
+                await context.bot.send_message(chat_id=i[1][0], text=f"{nick} покинул комнату")
             else:
                 del rooms[i[0]]
             break
@@ -110,7 +143,8 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if update.effective_user.id in room[1]:
                 for idrecieve in room[1]:
                     if idrecieve != update.effective_user.id:
-                        await context.bot.send_message(chat_id=idrecieve, text=f"Сообщение от: @{update.effective_user.username}")
+                        nick = get_nick(update)
+                        await context.bot.send_message(chat_id=idrecieve, text=f"Сообщение от: {nick}")
                         if message[1] == "text":
                             await context.bot.send_message(chat_id=idrecieve, text=message[0])
                         elif message[1] == "audio":
@@ -133,6 +167,8 @@ async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger(update)
+    nick = requests.request('GET', 'https://random-word-api.herokuapp.com/word').text.strip('[""]')
+    set_nick(update, nick)
     await context.bot.send_message(chat_id=update.effective_chat.id, text="Напишите /help для просмотра списка команд")
 
 async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -142,8 +178,19 @@ async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(chat_id=update.effective_chat.id, text=help_message)
 
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    pass
+
 if __name__ == '__main__':
     application = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    nick_handler = ConversationHandler(
+        entry_points=[CommandHandler('nickname', nickname)],
+        states={
+            SET_NICKNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_nickname)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
 
     echo_handler = MessageHandler(filters.TEXT and (~filters.COMMAND), echo)
     start_handler = CommandHandler('start', start)
@@ -154,6 +201,7 @@ if __name__ == '__main__':
     showrooms_handler = CommandHandler('showrooms', showrooms)
     help_handler = CommandHandler('help', help)
 
+    application.add_handler(nick_handler)
     application.add_handler(echo_handler)
     application.add_handler(start_handler)
     application.add_handler(makeroom_handler)
